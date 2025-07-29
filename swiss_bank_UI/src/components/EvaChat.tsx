@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -11,6 +11,7 @@ import { config } from "../lib/config";
 import type { AuthResponse } from "../services/authService";
 import { useOTPStatus } from '../hooks/useOTPStatus';
 import { CheckCircle2, ArrowRight, Shield, AlertTriangle, CreditCard, Eye, TrendingUp, Users2, MessageSquare, Target, Zap} from "lucide-react";
+import React from 'react';
 
 interface ClassificationData {
   complaint_id?: string;
@@ -80,7 +81,10 @@ interface EvaResponse {
   stage?: string;
   background_processing?: boolean;  
   next_action?: string;            
-  retry_in_seconds?: number;  
+  retry_in_seconds?: number;
+  needs_first_question?: boolean;
+  question_number?: number;
+  ready_for_normal_chat?: boolean; 
 }
 
 interface ParsedMessage {
@@ -102,6 +106,20 @@ interface ClassificationConfirmationData {
   next_steps: string[];
 }
 
+
+interface ComplexEvaResponse {
+  messageStructure: 'simple' | 'complex';
+  greeting?: string;
+  classification?: {
+    primary: string;
+    secondary: string;
+    confidence: string;
+  };
+  reasoning?: string;
+  question?: string;
+  actionButtons?: string[];
+}
+
 // Triage Analysis Animation Component
 const TriageAnalysisAnimation = () => (
   <div className="flex justify-start">
@@ -119,6 +137,257 @@ const TriageAnalysisAnimation = () => (
   </div>
 );
 
+// CollapsibleCard Component with persistent state management
+const CollapsibleCard = React.memo(({ 
+  title, 
+  children, 
+  defaultExpanded = false,
+  className = "",
+  cardId // Add unique ID to maintain state
+}: {
+  title: string;
+  children: React.ReactNode;
+  defaultExpanded?: boolean;
+  className?: string;
+  cardId?: string;
+}) => {
+  // Create a truly stable key that won't change across re-renders
+  const stableKey = useMemo(() => 
+    `collapsible_${cardId || title.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}`, 
+    [cardId, title]
+  );
+  
+  // Use a ref to maintain state across re-renders and prevent auto-closing
+  const [isExpanded, setIsExpanded] = useState(() => {
+    // Try to get saved state from sessionStorage as fallback, but default to defaultExpanded
+    try {
+      const saved = sessionStorage.getItem(stableKey);
+      return saved !== null ? JSON.parse(saved) : defaultExpanded;
+    } catch {
+      return defaultExpanded;
+    }
+  });
+
+  // Persist state to prevent auto-closing during re-renders
+  const handleToggle = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    setIsExpanded(prev => {
+      const newState = !prev;
+      // Save state to sessionStorage to persist across re-renders
+      try {
+        sessionStorage.setItem(stableKey, JSON.stringify(newState));
+      } catch {
+        // Ignore sessionStorage errors
+      }
+      return newState;
+    });
+  }, [stableKey]);
+
+  // Prevent the component from losing state during parent re-renders
+  const memoizedContent = useMemo(() => children, [children]);
+  
+  return (
+    <div className={`border border-black/20 rounded-lg transition-all duration-200 ${className}`}>
+      <button
+        onClick={handleToggle}
+        className="w-full flex items-center justify-between p-3 text-left hover:bg-black/5 transition-colors focus:outline-none focus:ring-2 focus:ring-black/20"
+        type="button"
+        aria-expanded={isExpanded}
+        aria-controls={`${stableKey}-content`}
+      >
+        <span className="font-semibold text-sm text-black">{title}</span>
+        <div className={`transform transition-transform duration-300 ease-in-out ${isExpanded ? 'rotate-180' : 'rotate-0'}`}>
+          <svg 
+            className="w-4 h-4 text-black/70" 
+            fill="none" 
+            stroke="currentColor" 
+            viewBox="0 0 24 24"
+          >
+            <path 
+              strokeLinecap="round" 
+              strokeLinejoin="round" 
+              strokeWidth={2} 
+              d="M19 9l-7 7-7-7" 
+            />
+          </svg>
+        </div>
+      </button>
+      
+      {isExpanded && (
+        <div 
+          id={`${stableKey}-content`}
+          className="px-3 pb-3 space-y-2 animate-in slide-in-from-top-2 duration-200"
+        >
+          {memoizedContent}
+        </div>
+      )}
+    </div>
+  );
+});
+
+
+// simple text message component with better spacing for follow-up questions
+// Enhanced simple text message component with better spacing for follow-up questions
+const SimpleTextMessage = ({ content, messageId }: { content: string; messageId: string }) => {
+  // Detect if this is a follow-up question message
+  const isFollowUpQuestion = content.trim().endsWith('?') && 
+                            (content.toLowerCase().includes('can you tell me') ||
+                             content.toLowerCase().includes('approximately when') ||
+                             content.toLowerCase().includes('how many') ||
+                             content.toLowerCase().includes('what') ||
+                             content.length < 200); // Simple question pattern
+
+  return (
+    <div className={`text-sm text-black ${isFollowUpQuestion ? 'space-y-3 p-6' : 'space-y-2 p-4'}`}>
+      {content.split('\n').map((line, lineIndex) => {
+        const trimmed = line.trim();
+        if (!trimmed) return <div key={lineIndex} className="h-2" />; // Spacing
+        
+        // Clean the line by removing all markdown asterisks and bullet points
+        const cleanedLine = trimmed.replace(/\*+/g, '').replace(/^•\s*/, '').trim();
+        
+        // Detect different line types
+        const isMainGreeting = lineIndex === 0 && !cleanedLine.includes(':');
+        
+        // Detect section headings that need to be bold
+        const isBoldHeading = (
+          cleanedLine.toLowerCase().startsWith('current status:') ||
+          cleanedLine.toLowerCase().startsWith('what i\'m doing right now:') ||
+          cleanedLine.toLowerCase().startsWith('what happens next:') ||
+          cleanedLine.toLowerCase().startsWith('your next actions:')
+        );
+        
+        // Detect the specific investigation text that needs to be bold
+        const isInvestigationText = cleanedLine.toLowerCase().includes('to ensure the fastest resolution') && 
+                                  cleanedLine.toLowerCase().includes('additional details');
+
+        // Detect bullet point content under specific headings
+        const isInBulletSection = () => {
+          const allLines = content.split('\n').map(l => l.trim().replace(/\*+/g, '').replace(/^•\s*/, '').trim());
+          let foundBulletSectionStart = false;
+          
+          for (let i = 0; i <= lineIndex; i++) {
+            const currentLine = allLines[i].toLowerCase();
+            
+            // Check if we hit a bullet section heading
+            if (currentLine.startsWith('what i\'m doing right now:') || 
+                currentLine.startsWith('what happens next:') || 
+                currentLine.startsWith('your next actions:')) {
+              foundBulletSectionStart = true;
+              continue;
+            }
+
+            // If we found a bullet section and hit another major heading, stop
+            if (foundBulletSectionStart && 
+                (currentLine.startsWith('current status:') || 
+                currentLine.includes('to ensure the fastest') ||
+                currentLine.includes('?'))) {
+              foundBulletSectionStart = false;
+            }
+          }
+          
+          return foundBulletSectionStart;
+        };
+
+        const isBulletContent = isInBulletSection() && !isBoldHeading && !isInvestigationText && !cleanedLine.includes('?');
+
+        // Restore missing variables
+        const isStatusLine = (
+          cleanedLine.toLowerCase().includes('tracking id:') || 
+          cleanedLine.toLowerCase().includes('has been routed') ||
+          cleanedLine.toLowerCase().includes('escalated your case')
+        ) && !cleanedLine.toLowerCase().startsWith('current status:');
+
+        const isQuestionLine = cleanedLine.includes('?');
+
+        // Apply appropriate styling with enhanced spacing for follow-up questions
+        if (isMainGreeting) {
+          return (
+            <div key={lineIndex} className={`leading-relaxed font-medium ${isFollowUpQuestion ? 'mb-4' : 'mb-3'}`}>
+              {cleanedLine}
+            </div>
+          );
+        }
+        
+        // Task 1: Bold headings
+        if (isBoldHeading) {
+          // Split heading from content
+          const parts = cleanedLine.split(':');
+          const heading = parts[0] + ':';
+          const content = parts.slice(1).join(':').trim();
+          
+          return (
+            <div key={lineIndex} className={`leading-relaxed ${isFollowUpQuestion ? 'mb-3' : 'mb-2'}`}>
+              <span className="font-bold">{heading}</span>
+              {content && <span className="font-normal ml-1">{content}</span>}
+            </div>
+          );
+        }
+                
+        // Task 3: Bold investigation text
+        if (isInvestigationText) {
+          return (
+            <div key={lineIndex} className={`leading-relaxed font-bold ${isFollowUpQuestion ? 'mb-3' : 'mb-2'}`}>
+              {cleanedLine}
+            </div>
+          );
+        }
+        
+        // Task 2: Bullet point content
+        if (isBulletContent) {
+          return (
+            <div key={lineIndex} className={`leading-relaxed ml-4 flex items-start ${isFollowUpQuestion ? 'mb-3' : 'mb-2'}`}>
+              <span className="mr-2 mt-1 text-black/70">•</span>
+              <span>{cleanedLine}</span>
+            </div>
+          );
+        }
+        
+        if (isStatusLine) {
+          // Check if this line contains tracking ID
+          if (cleanedLine.toLowerCase().includes('tracking id:')) {
+            const parts = cleanedLine.split(':');
+            const beforeColon = parts[0] + ':';
+            const afterColon = parts.slice(1).join(':').trim();
+            
+            return (
+              <div key={lineIndex} className={`leading-relaxed bg-black/5 p-2 rounded ${isFollowUpQuestion ? 'mb-3' : 'mb-2'}`}>
+                {beforeColon} <span className="font-bold">{afterColon}</span>
+              </div>
+            );
+          }
+          
+          return (
+            <div key={lineIndex} className={`leading-relaxed bg-black/5 p-2 rounded ${isFollowUpQuestion ? 'mb-3' : 'mb-2'}`}>
+              {cleanedLine}
+            </div>
+          );
+        }
+        
+        if (isQuestionLine) {
+          // Enhanced spacing and styling for follow-up questions
+          return (
+            <div key={lineIndex} className={`leading-relaxed font-medium bg-blue-50 rounded border-l-4 border-blue-400 italic ${
+              isFollowUpQuestion ? 'mb-4 p-6 text-base' : 'mb-3 p-4'
+            }`}>
+              {cleanedLine}
+            </div>
+          );
+        }
+                
+        // Default line with enhanced spacing for follow-up questions
+        return (
+          <div key={lineIndex} className={`leading-relaxed ${isFollowUpQuestion ? 'mb-3' : 'mb-2'}`}>
+            {cleanedLine}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
 const VoiceToggleButton = ({ 
   message, 
   currentlyPlayingMessageId, 
@@ -133,57 +402,101 @@ const VoiceToggleButton = ({
   const isPlaying = currentlyPlayingMessageId === message.id;
   
   return (
-    <div className="flex items-center space-x-2 mt-2 justify-end animate-fade-in">
-      {/* Enhanced Voice Toggle Button */}
+    <div className="flex items-center space-x-3 mt-2 justify-end animate-fade-in">
+      {/* Fixed Voice Toggle Button - Direct icon with yellow hover, no tooltips */}
       <button
         onClick={() => onToggleVoice(message.content, message.id)}
-        className={`group relative flex items-center justify-center w-8 h-8 rounded-full transition-all duration-300 border-2 hover:scale-110 transform ${
+        className={`flex items-center justify-center transition-all duration-300 hover:scale-110 transform ${
           isPlaying
-            ? 'bg-yellow-400/20 text-yellow-400 border-yellow-400 animate-pulse shadow-lg shadow-yellow-400/30'
-            : 'bg-gray-800/50 hover:bg-yellow-400/20 text-gray-400 hover:text-yellow-400 border-gray-600 hover:border-yellow-400/70 hover:shadow-lg hover:shadow-yellow-400/20'
+            ? 'text-yellow-400 animate-pulse'
+            : 'text-gray-400 hover:text-yellow-400'
         }`}
-        title={isPlaying ? "Stop playing message" : "Play message aloud"}
       >
-        {/* Icon with smooth transition */}
-        <div className="relative">
-          {isPlaying ? (
-            <VolumeX className="w-3 h-3 transition-all duration-200" />
-          ) : (
-            <Volume2 className="w-3 h-3 transition-all duration-200" />
-          )}
-        </div>
-        
-        {/* Ripple effect when playing */}
-        {isPlaying && (
-          <div className="absolute inset-0 rounded-full border-2 border-yellow-400/30 animate-ping" />
+        {/* Icon with smooth transition - no circular background */}
+        {isPlaying ? (
+          <VolumeX className="w-3 h-3 transition-all duration-200" />
+        ) : (
+          <Volume2 className="w-3 h-3 transition-all duration-200" />
         )}
-        
-        {/* Tooltip */}
-        <div className="absolute bottom-full mb-2 left-1/2 transform -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none">
-          <div className="bg-black/90 text-white text-xs px-2 py-1 rounded whitespace-nowrap">
-            {isPlaying ? "Stop" : "Play"}
-          </div>
-          <div className="absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-black/90"></div>
-        </div>
       </button>
       
-      {/* Copy Button */}
+      {/* Fixed Copy Button - Direct icon with yellow hover, no tooltips */}
       <button
         onClick={() => onCopyMessage(message.content)}
-        className="group relative flex items-center justify-center w-8 h-8 bg-gray-800/50 hover:bg-yellow-400/20 text-gray-400 hover:text-yellow-400 rounded-full transition-all duration-300 border-2 border-gray-600 hover:border-yellow-400/70 hover:shadow-lg hover:shadow-yellow-400/20 hover:scale-110 transform"
-        title="Copy message to clipboard"
+        className="flex items-center justify-center text-gray-400 hover:text-yellow-400 transition-all duration-300 hover:scale-110 transform"
       >
         <Copy className="w-3 h-3 transition-all duration-200" />
-        
-        {/* Tooltip */}
-        <div className="absolute bottom-full mb-2 left-1/2 transform -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none">
-          <div className="bg-black/90 text-white text-xs px-2 py-1 rounded whitespace-nowrap">
-            Copy
-          </div>
-          <div className="absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-black/90"></div>
-        </div>
       </button>
     </div>
+  );
+};
+
+// Greeting message style
+const MicrosoftCopilotCard = ({ content, messageId }: { content: string; messageId: string }) => {
+  // Parse dynamic greeting and message parts
+  const parseGreetingMessage = (text: string) => {
+    const lines = text.split('\n').filter(line => line.trim());
+    
+    // Detect greeting pattern (Good morning/afternoon/evening + name)
+    const greetingRegex = /^(Good\s+(morning|afternoon|evening),?\s+([^!]+)!?)/i;
+    const greetingMatch = text.match(greetingRegex);
+    
+    let greeting = '';
+    let restOfMessage = text;
+    
+    if (greetingMatch) {
+      greeting = greetingMatch[0];
+      restOfMessage = text.replace(greetingMatch[0], '').trim();
+    }
+    
+    // Split remaining content into introduction and question
+    const questionRegex = /(What\s+[^?]*\?|How\s+[^?]*\?)/i;
+    const questionMatch = restOfMessage.match(questionRegex);
+    
+    let introduction = restOfMessage;
+    let question = '';
+    
+    if (questionMatch) {
+      question = questionMatch[0];
+      introduction = restOfMessage.replace(questionMatch[0], '').trim();
+    }
+    
+    return { greeting, introduction, question };
+  };
+
+  const { greeting, introduction, question } = parseGreetingMessage(content);
+  
+  return (
+    <>
+      {/* Header with greeting */}
+      {greeting && (
+        <div className="border-b border-yellow-400/40 px-4 py-3 bg-yellow-600/10">
+          <div className="flex items-center space-x-2">
+            <span className="text-lg">🌅</span>
+            <span className="font-semibold text-black text-sm">{greeting}</span>
+          </div>
+        </div>
+      )}
+      
+      {/* Main content */}
+      <div className="px-4 py-3 space-y-3">
+        {/* Introduction section */}
+        {introduction && (
+          <div className="text-sm text-black leading-relaxed">
+            {introduction}
+          </div>
+        )}
+      </div>
+      
+      {/* Question section */}
+      {question && (
+        <div className="border-t border-yellow-400/20 px-4 py-3 bg-yellow-500/5">
+          <div className="flex items-center space-x-2">
+            <span className="text-sm font-medium text-black">{question}</span>
+          </div>
+        </div>
+      )}
+    </>
   );
 };
 
@@ -215,15 +528,13 @@ const AuthenticatedEvaChat = () => {
   } | null>(null);
   
   const [showAnalysisAnimation, setShowAnalysisAnimation] = useState(false);
-
+  
   // OTP Status using the hook
   const { 
     otpStatus, 
-    isLoading: otpStatusLoading, 
     error: otpStatusError,
     refreshStatus: refreshOTPStatus,
     formatTimeRemaining,
-    getColorForStatus,
     getUrgencyLevel 
   } = useOTPStatus(sessionId);
   
@@ -264,15 +575,35 @@ const AuthenticatedEvaChat = () => {
     scrollToBottom();
   }, [messages]);
 
+  // Add this function inside AuthenticatedEvaChat component
+  const handleSetInputTextWithFocus = useCallback((text: string) => {
+    setInputText(text);
+    
+    // Focus the input and position cursor at the end
+    setTimeout(() => {
+      if (inputRef.current) {
+        inputRef.current.focus();
+        inputRef.current.setSelectionRange(text.length, text.length);
+      }
+    }, 100);
+  }, []);
+
+  // Enhanced cleanup effect for proper voice management
   useEffect(() => {
-    return () => {
+    // Cleanup function to stop voice when component unmounts or chat closes
+    const cleanup = () => {
       try {
-        speechSynthesis.cancel();
-        console.log('🧹 Voice cleanup on component unmount');
+        if (speechSynthesis.speaking) {
+          speechSynthesis.cancel();
+          console.log('🧹 Voice cleanup - synthesis cancelled');
+        }
+        setCurrentlyPlayingMessageId(null);
       } catch (error) {
         console.error('Error during voice cleanup:', error);
       }
     };
+
+    return cleanup;
   }, []);
 
   // Stop voice when chat is closed
@@ -297,7 +628,7 @@ const AuthenticatedEvaChat = () => {
     // NEVER auto-play - only play when explicitly requested
     console.log('🔇 Auto-play disabled by default');
     return;
-  }, []); // Removed unnecessary voiceService dependency
+  }, []); 
 
   // Function to play specific message (for individual play buttons)
   const playSpecificMessage = useCallback(async (content: string, messageId: string) => {
@@ -320,14 +651,12 @@ const AuthenticatedEvaChat = () => {
     } catch (error) {
       console.error('Error playing specific message:', error);
       setCurrentlyPlayingMessageId(null);
-      toast.error('Failed to play message');
     }
   }, [voiceService]);
-
   // Function to stop current voice playback
   const stopCurrentVoice = useCallback(() => {
   try {
-    speechSynthesis.cancel(); // Stop browser speech synthesis
+    speechSynthesis.cancel(); 
     setCurrentlyPlayingMessageId(null);
     toast.info('🔇 Voice playback stopped');
     console.log('🛑 All voice playback stopped');
@@ -338,7 +667,7 @@ const AuthenticatedEvaChat = () => {
 }, []);
 
 
-  // NEW: Simplified and robust toggle voice for specific message
+  // Simplified and robust toggle voice for specific message
   const toggleMessageVoice = useCallback(async (content: string, messageId: string) => {
   console.log('🎯 Toggle voice called for message:', messageId, 'Currently playing:', currentlyPlayingMessageId);
   
@@ -348,14 +677,10 @@ const AuthenticatedEvaChat = () => {
       console.log('🛑 Stopping voice for message:', messageId);
       
       // Force stop all speech synthesis
-      if (speechSynthesis.speaking) {
-        speechSynthesis.cancel();
-      }
+      speechSynthesis.cancel();
       
       // Clear the playing state immediately
       setCurrentlyPlayingMessageId(null);
-      
-      toast.info('🔇 Voice stopped');
       console.log('✅ Voice successfully stopped for message:', messageId);
       
     } else {
@@ -366,32 +691,53 @@ const AuthenticatedEvaChat = () => {
       if (currentlyPlayingMessageId || speechSynthesis.speaking) {
         console.log('🛑 Stopping previous voice before starting new one');
         speechSynthesis.cancel();
+        
+        // Wait a moment for the cancellation to take effect
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
       
       // Set this message as currently playing BEFORE starting
       setCurrentlyPlayingMessageId(messageId);
       console.log('🎯 Set message as currently playing:', messageId);
       
-      // Start playing the message with error handling
+      // Start playing the message with proper error handling
       try {
-        await voiceService.textToSpeech(content);
+        // Create and configure speech synthesis
+        const utterance = new SpeechSynthesisUtterance(content);
         
-        // Only clear if this message is still the current one
-        setCurrentlyPlayingMessageId(prev => {
-          if (prev === messageId) {
-            console.log('✅ Voice completed for message:', messageId);
-            return null;
-          }
-          console.log('🔄 Another message started playing, keeping state');
-          return prev;
-        });
+        // Configure voice settings
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
         
-        toast.success('🔊 Message played');
+        // Set up event handlers
+        utterance.onend = () => {
+          console.log('✅ Speech ended for message:', messageId);
+          setCurrentlyPlayingMessageId(prev => {
+            if (prev === messageId) {
+              console.log('✅ Clearing playing state for completed message:', messageId);
+              return null;
+            }
+            console.log('🔄 Another message is playing, keeping state');
+            return prev;
+          });
+        };
+        
+        utterance.onerror = (event) => {
+          console.error('❌ Speech synthesis error:', event.error);
+          setCurrentlyPlayingMessageId(null);
+        };
+        
+        utterance.onstart = () => {
+          console.log('🎵 Speech started for message:', messageId);
+        };
+        
+        // Start speaking
+        speechSynthesis.speak(utterance);
         
       } catch (speechError) {
         console.error('❌ Speech synthesis error:', speechError);
         setCurrentlyPlayingMessageId(null);
-        toast.error('Failed to play message - speech synthesis error');
       }
     }
   } catch (error) {
@@ -399,23 +745,22 @@ const AuthenticatedEvaChat = () => {
     setCurrentlyPlayingMessageId(null);
     toast.error('Voice operation failed');
   }
-}, [currentlyPlayingMessageId, voiceService]);
-
-
+}, [currentlyPlayingMessageId]);
 
   // Copy message function
   const copyMessage = (content: string) => {
     // Clean the content from any markdown or special characters for copying
     const cleanContent = content
-      .replace(/\*\*/g, '') // Remove bold markdown
-      .replace(/\*/g, '')   // Remove italic markdown
-      .replace(/\n\s*\n/g, '\n') // Remove extra line breaks
+      .replace(/\*\*/g, '') 
+      .replace(/\*/g, '')   
+      .replace(/\n\s*\n/g, '\n') 
       .trim();
       
     navigator.clipboard.writeText(cleanContent).then(() => {
       toast.success('📋 Message copied to clipboard');
     }).catch(err => {
       console.error('Failed to copy message:', err);
+
       // Fallback for older browsers
       const textArea = document.createElement('textarea');
       textArea.value = cleanContent;
@@ -432,21 +777,187 @@ const AuthenticatedEvaChat = () => {
     });
   };
 
+  const parseComplexEvaResponse = (content: string): ComplexEvaResponse => {
+    console.log('🔍 Parsing complex Eva response:', content.substring(0, 100) + '...');
+    
+    // Check if this is a complex triage confirmation response
+    const hasClassification = content.includes('Classification:') || 
+                             content.includes('Primary Category:') ||
+                             content.includes('Complaint Classification:');
+    
+    const hasReasoning = content.includes('Why we labeled it this way:') ||
+                        content.includes('Why we categorized') ||
+                        content.includes('This complaint clearly falls under');
+    
+    const hasQuestion = content.includes('Does this assessment') ||
+                       content.includes('accurately capture') ||
+                       content.includes('sound right');
+    
+    if (!hasClassification && !hasReasoning) {
+      return { messageStructure: 'simple' };
+    }
+    
+    // Extract greeting (everything before classification)
+    const greetingMatch = content.match(/^([^:\n]*?)(?=\n.*Classification:|Classification:|Primary Category:)/s);
+    const greeting = greetingMatch?.[1]?.trim() || '';
+    
+    // Extract classification details
+    let classification;
+    const classificationSection = content.match(/(?:Complaint Classification:|Classification:)(.*?)(?=Why we labeled|Does this assessment|$)/s);
+    if (classificationSection) {
+      const classText = classificationSection[1];
+      const primaryMatch = classText.match(/Primary Category[:\s]*([^\n]+)/i);
+      const secondaryMatch = classText.match(/Secondary Category[:\s]*([^\n]+)/i);
+      const confidenceMatch = classText.match(/Confidence Level?[:\s]*([^\n]+)/i);
+      
+      classification = {
+        primary: primaryMatch?.[1]?.trim() || 'Not specified',
+        secondary: secondaryMatch?.[1]?.trim() || 'None',
+        confidence: confidenceMatch?.[1]?.trim() || 'Not specified'
+      };
+    }
+    
+    // Extract reasoning (Why we labeled it this way section)
+    const reasoningMatch = content.match(/Why we labeled it this way:(.*?)(?=Does this assessment|$)/s);
+    const reasoning = reasoningMatch?.[1]?.trim() || '';
+    
+    // Extract final question
+    const questionMatch = content.match(/(Does this assessment.*?resolution steps\.)/s);
+    const question = questionMatch?.[1]?.trim() || '';
+    
+    return {
+      messageStructure: 'complex',
+      greeting: greeting || undefined,
+      classification,
+      reasoning: reasoning || undefined,
+      question: question || undefined,
+      actionButtons: question ? ['Yes, this is accurate', 'No, needs adjustment'] : undefined
+    };
+  };
+
+  // Complex message component for triage confirmation responses
+  const ComplexStructuredMessage = React.memo(({ 
+    parsedResponse, 
+    messageId,
+    onSendMessage,
+    onSetInputText 
+  }: { 
+    parsedResponse: ReturnType<typeof parseComplexEvaResponse>; 
+    messageId: string;
+    onSendMessage: (message: string) => void;
+    onSetInputText: (text: string) => void;
+  }) => {
+    const [confirmationSent, setConfirmationSent] = useState(false);
+    
+    const handleConfirmation = useCallback((response: string) => {
+      if (confirmationSent) return;
+      setConfirmationSent(true);
+      
+      console.log('🎯 User confirmation:', response);
+      
+      if (response.toLowerCase().includes('yes')) {
+        console.log('✅ Sending YES confirmation to bot');
+        onSendMessage('Yes, this is accurate');
+        
+        // Reset after message is sent
+        setTimeout(() => setConfirmationSent(false), 1000);
+      } else if (response.toLowerCase().includes('no')) {
+        // Pre-fill input with "No. Cause, " and focus for user to add details
+        console.log('❌ Setting NO response in input for user to complete');
+        onSetInputText('No. Cause, ');
+        
+        // Reset confirmation state immediately so user can type
+        setTimeout(() => setConfirmationSent(false), 100);
+      }
+    }, [confirmationSent, onSendMessage, onSetInputText]);
+    
+    if (parsedResponse.messageStructure === 'simple') {
+      return null; // Use regular parsing for simple messages
+    }
+    
+    return (
+      <div className="space-y-3">
+        {/* Greeting */}
+        {parsedResponse.greeting && (
+          <div className="text-sm leading-relaxed text-black">
+            {parsedResponse.greeting}
+          </div>
+        )}
+        
+        {/* Classification Summary (Always Visible) */}
+        {parsedResponse.classification && (
+          <div className="space-y-1 text-sm text-black">
+            <div className="font-bold text-sm text-black mb-3 pb-1 border-b-2 border-black/30">
+                Analysis Complete - Classification Results
+            </div>
+            <div className="space-y-1 text-sm text-black ml-4">
+              <div><strong>Primary Category:</strong> {parsedResponse.classification.primary.replace(/\*+\s*/g, '')}</div>
+              <div><strong>Secondary Category:</strong> {parsedResponse.classification.secondary.replace(/\*+\s*/g, '')}</div>
+              <div><strong>Confidence Level:</strong> {parsedResponse.classification.confidence.replace(/\*+\s*/g, '')}</div>
+            </div>
+          </div>
+        )}
+        
+        {/* Detailed Analysis (Collapsible) - Fixed with stable ID */}
+        {parsedResponse.reasoning && (
+          <CollapsibleCard 
+            title="Why we labeled it this way:" 
+            defaultExpanded={false}
+            className="bg-black/5"
+            cardId={`reasoning-${messageId}`} // Unique stable ID
+          >
+            <div className="text-sm leading-relaxed text-black space-y-3">
+              {/* Break reasoning into logical paragraphs */}
+              {parsedResponse.reasoning.split(/\.\s+(?=[A-Z])/).map((sentence, index) => {
+                if (sentence.trim().length === 0) return null;
+                
+                const cleanSentence = sentence.trim();
+                const finalSentence = cleanSentence.endsWith('.') ? cleanSentence : cleanSentence + '.';
+                
+                return (
+                  <p key={index} className="text-black">
+                    {finalSentence}
+                  </p>
+                );
+              })}
+            </div>
+          </CollapsibleCard>
+        )}
+        
+        {/* Confirmation Question */}
+        {parsedResponse.question && (
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+            <div className="text-sm text-black mb-3">
+              {parsedResponse.question}
+            </div>
+            
+            {parsedResponse.actionButtons && (
+              <div className="flex gap-2">
+                {parsedResponse.actionButtons.map((button, index) => (
+                  <button
+                    key={index}
+                    onClick={() => handleConfirmation(button)}
+                    disabled={confirmationSent && button.toLowerCase().includes('yes')}
+                    className={`px-3 py-1 text-xs rounded transition-colors ${
+                      button.toLowerCase().includes('yes') 
+                        ? 'bg-green-600 text-white hover:bg-green-700 disabled:bg-green-400' 
+                        : 'bg-gray-600 text-white hover:bg-gray-700 disabled:bg-gray-400'
+                    }`}
+                  >
+                    {(confirmationSent && button.toLowerCase().includes('yes')) ? 'Sent...' : button}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  });
+
   // Enhanced parsing function with follow-up question extraction
   const parseEvaMessage = (content: string): { parsedMessage: ParsedMessage | null, followUpQuestions: string[] } => {
     console.log('🔍 Parsing content:', content.substring(0, 100) + '...');
-    
-    // Enhanced detection patterns that match the actual Eva output
-    const hasStructure = content.includes('**What I\'m doing right now:**') || 
-                        content.includes('**What happens next:**') || 
-                        content.includes('**Your next actions:**') ||
-                        content.includes('**What I\'m doing**') ||
-                        content.includes('**What happens**') ||
-                        content.includes('**Your actions**') ||
-                        content.includes('**Next steps**') ||
-                        content.includes('**Current status**');
-    
-    console.log('📋 Structure detected:', hasStructure);
     
     // Extract follow-up questions (anything that ends with ?)
     const followUpQuestions: string[] = [];
@@ -460,10 +971,29 @@ const AuthenticatedEvaChat = () => {
       });
     }
     
-    if (!hasStructure) {
-      return { parsedMessage: null, followUpQuestions };
+    // Check for existing structured patterns
+    const hasExistingStructure = content.includes('**What I\'m doing right now:**') || 
+                                content.includes('**What happens next:**') || 
+                                content.includes('**Your next actions:**') ||
+                                content.includes('**What I\'m doing**') ||
+                                content.includes('**What happens**') ||
+                                content.includes('**Your actions**') ||
+                                content.includes('**Next steps**') ||
+                                content.includes('**Current status**');
+    
+    console.log('📋 Structure detected:', hasExistingStructure);
+    
+    // If existing structure found, use original parsing
+    if (hasExistingStructure) {
+      return parseOriginalStructure(content, followUpQuestions);
     }
 
+    // NEW: For unstructured content, return null to use simple text rendering
+    return { parsedMessage: null, followUpQuestions };
+  };
+
+  // Original parsing logic (unchanged)
+  const parseOriginalStructure = (content: string, followUpQuestions: string[]): { parsedMessage: ParsedMessage | null, followUpQuestions: string[] } => {
     const sections: ParsedMessage['sections'] = [];
     let intro = '';
     let conclusion = '';
@@ -540,7 +1070,7 @@ const AuthenticatedEvaChat = () => {
     intro = introLines.join(' ').trim();
     conclusion = conclusionLines.join(' ').trim();
 
-    console.log('✅ Parsing complete:', {
+    console.log('✅ Original parsing complete:', {
       hasIntro: !!intro,
       sectionsCount: sections.length,
       hasConclusion: !!conclusion,
@@ -556,37 +1086,152 @@ const AuthenticatedEvaChat = () => {
     return { parsedMessage, followUpQuestions };
   };
 
+  // NEW: Smart parsing for unstructured content
+  const parseUnstructuredContent = (content: string, followUpQuestions: string[]): { parsedMessage: ParsedMessage | null, followUpQuestions: string[] } => {
+    console.log('🧠 Using smart parsing for unstructured content');
+    
+    // Remove questions from content
+    let contentWithoutQuestions = content;
+    followUpQuestions.forEach(question => {
+      contentWithoutQuestions = contentWithoutQuestions.replace(question, '').trim();
+    });
+    
+    // Split into paragraphs
+    const paragraphs = contentWithoutQuestions.split('\n\n').filter(p => p.trim());
+    
+    if (paragraphs.length <= 1) {
+      // Single paragraph, no structure needed
+      console.log('📝 Single paragraph detected, no structuring needed');
+      return { parsedMessage: null, followUpQuestions };
+    }
+    
+    const sections: ParsedMessage['sections'] = [];
+    let intro = '';
+    
+    // First paragraph is usually the intro/greeting
+    if (paragraphs.length > 0) {
+      intro = paragraphs[0].trim();
+      console.log('📝 Intro detected:', intro.substring(0, 50) + '...');
+    }
+    
+    // Process remaining paragraphs as sections
+    for (let i = 1; i < paragraphs.length; i++) {
+      const paragraph = paragraphs[i].trim();
+      
+      // Smart section detection with cleaned content
+      const sectionInfo = detectSectionTypeAndClean(paragraph);
+      
+      // Only add section if it has content after cleaning
+      if (sectionInfo.items.length > 0 && sectionInfo.items[0].trim() !== '') {
+        console.log('📝 Section detected:', sectionInfo.title);
+        
+        sections.push({
+          title: sectionInfo.title,
+          items: sectionInfo.items,
+          icon: sectionInfo.icon,
+          emoji: sectionInfo.emoji
+        });
+      }
+    }
+    
+    const parsedMessage = {
+      intro: intro || undefined,
+      sections,
+      conclusion: undefined
+    };
+    
+    console.log('✅ Smart parsing complete:', {
+      hasIntro: !!intro,
+      sectionsCount: sections.length,
+      followUpQuestionsCount: followUpQuestions.length
+    });
+    
+    return { parsedMessage, followUpQuestions };
+  };
+
+  // NEW: Smart section detection with content cleaning
+  const detectSectionTypeAndClean = (paragraph: string): { title: string, items: string[], icon: string, emoji: string } => {
+    const text = paragraph.toLowerCase();
+    
+    // Status/tracking patterns
+    if (text.includes('status') || text.includes('tracking') || text.includes('routed') || text.includes('queue') || text.includes('escalated')) {
+      return {
+        title: 'Current Status',
+        items: cleanRedundantContent(paragraph, 'current status'),
+        icon: 'message-square',
+        emoji: '📊'
+      };
+    }
+    
+    // Next steps/what happens patterns
+    if (text.includes('specialist team') || text.includes('will begin') || text.includes('updates') || text.includes('receive') || text.includes('investigating')) {
+      return {
+        title: 'What Happens Next',
+        items: cleanRedundantContent(splitIntoItems(paragraph), 'what happens next'),
+        icon: 'clock',
+        emoji: '⏱️'
+      };
+    }
+    
+    // Information gathering patterns
+    if (text.includes('gather') || text.includes('additional details') || text.includes('help our') || text.includes('investigation team') || text.includes('let me gather')) {
+      return {
+        title: 'Information Gathering',
+        items: cleanRedundantContent([paragraph], 'information gathering'),
+        icon: 'target',
+        emoji: '🔍'
+      };
+    }
+    
+    // Default
+    return {
+      title: 'Additional Information',
+      items: cleanRedundantContent([paragraph], 'additional information'),
+      icon: 'message-square',
+      emoji: '📋'
+    };
+  };
+
+  // NEW: Clean redundant content from items
+  const cleanRedundantContent = (items: string | string[], titleToRemove: string): string[] => {
+    const itemsArray = Array.isArray(items) ? items : [items];
+    
+    return itemsArray.map(item => {
+      let cleanedItem = item.trim();
+      
+      // Remove redundant title patterns
+      const patterns = [
+        new RegExp(`^\\*\\*${titleToRemove}\\*\\*:?\\s*`, 'i'),
+        new RegExp(`^${titleToRemove}:?\\s*`, 'i'),
+        /^\*\*[^*]+\*\*:?\s*/,  // Remove any **Title**: pattern
+      ];
+      
+      patterns.forEach(pattern => {
+        cleanedItem = cleanedItem.replace(pattern, '');
+      });
+      
+      // Clean up extra spaces and formatting
+      cleanedItem = cleanedItem.replace(/\s+/g, ' ').trim();
+      
+      return cleanedItem;
+    }).filter(item => item.length > 0);
+  };
+
+  // Helper to split paragraph into logical items (unchanged)
+  const splitIntoItems = (paragraph: string): string[] => {
+    // Split by sentences that seem like separate items
+    const sentences = paragraph.split(/(?<=[.!])\s+(?=[A-Z])/);
+    
+    if (sentences.length > 1) {
+      return sentences.map(s => s.trim()).filter(s => s.length > 0);
+    }
+    
+    return [paragraph];
+};
+
   // Section styling with single icon only
   const getSectionStyling = (title: string) => {
     const titleLower = title.toLowerCase();
-    
-    if (titleLower.includes('doing right now') || titleLower.includes('doing now') || titleLower.includes('current action')) {
-      return {
-        icon: 'zap',
-        emoji: '🔧'
-      };
-    }
-    
-    if (titleLower.includes('happens next') || titleLower.includes('next step') || titleLower.includes('what happens')) {
-      return {
-        icon: 'clock',
-        emoji: '⏰'
-      };
-    }
-    
-    if (titleLower.includes('your next actions') || titleLower.includes('your action') || titleLower.includes('next actions')) {
-      return {
-        icon: 'target',
-        emoji: '🎯'
-      };
-    }
-    
-    if (titleLower.includes('current status') || titleLower.includes('status')) {
-      return {
-        icon: 'eye',
-        emoji: '👁️'
-      };
-    }
     
     if (titleLower.includes('specialist') || titleLower.includes('team')) {
       return {
@@ -602,6 +1247,36 @@ const AuthenticatedEvaChat = () => {
     };
   };
 
+
+  // Helper function
+  const getSectionIcon = (title: string) => {
+    const titleLower = title.toLowerCase();
+    
+    if (titleLower.includes('doing') || titleLower.includes('right now')) {
+      return '⚡';
+    } else if (titleLower.includes('happens next') || titleLower.includes('what happens')) {
+      return '⏱️';
+    } else if (titleLower.includes('your') || titleLower.includes('action')) {
+      return '📋';
+    } else if (titleLower.includes('status') || titleLower.includes('current')) {
+      return '📊';
+    }
+    return '•';
+  };
+
+  const getSectionClass = (title: string) => {
+    const titleLower = title.toLowerCase();
+    
+    if (titleLower.includes('doing') || titleLower.includes('right now')) {
+      return 'section-immediate';
+    } else if (titleLower.includes('happens next')) {
+      return 'section-upcoming';
+    } else if (titleLower.includes('your') || titleLower.includes('action')) {
+      return 'section-action';
+    }
+    return 'section-immediate';
+  };
+  
   // Helper function to get the icon component
   const getIconComponent = (iconName: string, className: string = "w-4 h-4") => {
     const icons: Record<string, JSX.Element> = {
@@ -629,54 +1304,60 @@ const AuthenticatedEvaChat = () => {
     messageId: string; 
   }) => {
     return (
-      <div className="space-y-4">
-        {/* Intro with emoji */}
+      <div className="space-y-3">
+        {/* Intro with enhanced styling */}
         {parsedMessage.intro && (
-          <div className="text-sm leading-relaxed flex items-start space-x-2">
-            <span className="text-lg">📱</span>
-            <span className="text-black">{parsedMessage.intro}</span>
+          <div className="rounded-lg border border-black/20 bg-black/5 p-3 structured-section transition-all duration-200 hover:shadow-md">
+            <div className="text-sm leading-relaxed text-black">
+              {parsedMessage.intro}
+            </div>
           </div>
         )}
 
-        {/* Structured Sections - Black theme with single icon */}
-        {parsedMessage.sections.map((section, index) => (
-          <div 
-            key={`${messageId}-section-${index}`}
-            className="bg-black/10 border border-black/20 rounded-lg p-3 space-y-3 transition-all duration-200 hover:shadow-md"
-          >
-            {/* Section Header with single emoji */}
-            <div className="flex items-center space-x-2 mb-3">
-              <span className="text-lg">{section.emoji}</span>
-              <h4 className="font-semibold text-sm text-black">
-                {section.title}
-              </h4>
+        {/* Enhanced Structured Sections */}
+        {parsedMessage.sections.map((section, index) => {
+          const sectionClass = getSectionClass(section.title);
+          const sectionIcon = getSectionIcon(section.title);
+          
+          return (
+            <div 
+              key={`${messageId}-section-${index}`}
+              className={`rounded-lg border p-3 structured-section transition-all duration-200 hover:shadow-md ${sectionClass}`}
+            >
+              {/* Section Header with icon */}
+              <div className="flex items-center space-x-2 mb-3">
+                <span className="text-lg">{sectionIcon}</span>
+                <h4 className="font-semibold text-sm text-black">
+                  {section.title}
+                </h4>
+              </div>
+              
+              {/* Section Items with enhanced styling */}
+              <div className="space-y-2 ml-6">
+                {section.items.map((item, itemIndex) => (
+                  <div 
+                    key={`${messageId}-item-${index}-${itemIndex}`}
+                    className="flex items-start space-x-3 text-sm group"
+                  >
+                    <div className="mt-2 w-1.5 h-1.5 bg-black rounded-full flex-shrink-0 opacity-70 group-hover:opacity-100 transition-opacity bullet-point" />
+                    <span className="leading-relaxed text-black">{item}</span>
+                  </div>
+                ))}
+              </div>
             </div>
-            
-            {/* Section Items - Black bullet points and text */}
-            <div className="space-y-2">
-              {section.items.map((item, itemIndex) => (
-                <div 
-                  key={`${messageId}-item-${index}-${itemIndex}`}
-                  className="flex items-start space-x-3 text-sm group"
-                >
-                  <div className="mt-2 w-1.5 h-1.5 bg-black rounded-full flex-shrink-0 opacity-70 group-hover:opacity-100 transition-opacity" />
-                  <span className="leading-relaxed text-black">{item}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
+          );
+        })}
 
-        {/* Conclusion with emoji - Black text */}
+        {/* Conclusion with enhanced styling */}
         {parsedMessage.conclusion && (
-          <div className="text-sm leading-relaxed bg-black/10 p-3 rounded border-l-4 border-black flex items-start space-x-2">
-            <span className="text-lg">💡</span>
-            <span className="text-black">{parsedMessage.conclusion}</span>
+          <div className="text-sm leading-relaxed text-black italic pl-4 border-l-2 border-black/20">
+            {parsedMessage.conclusion}
           </div>
         )}
       </div>
     );
   };
+
 
   // Fetch Eva system status on component mount
   useEffect(() => {
@@ -742,7 +1423,7 @@ const AuthenticatedEvaChat = () => {
     const category = triageResults.triage_analysis?.primary_category || 'general_inquiry';
     
     // Fix the confidence calculation with proper type checking
-    let confidence = 0.8; // default value
+    let confidence = 0.8; 
     if (triageResults.triage_analysis?.confidence_scores) {
       const scores = Object.values(triageResults.triage_analysis.confidence_scores);
       if (scores.length > 0 && scores.every(score => typeof score === 'number')) {
@@ -778,8 +1459,7 @@ const AuthenticatedEvaChat = () => {
       setTimeout(() => {
         setMessages(prev => [...prev, questionMessage]);
         // Play voice for follow-up questions ONLY if user explicitly requests
-        // No auto-play by default
-      }, 1000 + (index * 1500)); // Delay for natural conversation flow
+      }, 1000 + (index * 1500)); 
     });
   }, []);
 
@@ -905,7 +1585,7 @@ const AuthenticatedEvaChat = () => {
   // Sequential message handling with voice-aware timing
   useEffect(() => {
     if (pendingSequentialMessage) {
-      const delay = isVoiceMuted ? 10000 : 5000; // 10s if voice disabled, 5s if enabled
+      const delay = isVoiceMuted ? 10000 : 5000; 
       
       const timer = setTimeout(async () => {
         try {
@@ -1071,7 +1751,7 @@ const AuthenticatedEvaChat = () => {
       if (response.success) {
         toast.success('New verification code sent!');
         // The OTP status will be automatically updated by the hook
-        await refreshOTPStatus(); // Manually refresh for immediate update
+        await refreshOTPStatus(); 
       } else {
         toast.error(authService.getUserFriendlyError(response));
       }
@@ -1184,233 +1864,218 @@ const AuthenticatedEvaChat = () => {
 
   // Handle sending messages
   const handleSendMessage = async (content: string, type: 'text' | 'voice' | 'image' | 'document' = 'text') => {
-    if (!content.trim() && type === 'text') return;
-    if (!isAuthenticated) {
-      toast.error('Please authenticate first');
-      return;
-    }
+  if (!content.trim() && type === 'text') return;
+  if (!isAuthenticated) {
+    toast.error('Please authenticate first');
+    return;
+  }
 
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      type: 'user',
-      content,
-      timestamp: new Date(),
-      messageType: type
-    };
+  const userMessage: Message = {
+    id: Date.now().toString(),
+    type: 'user',
+    content,
+    timestamp: new Date(),
+    messageType: type
+  };
 
-    setMessages(prev => [...prev, userMessage]);
-    setInputText('');
-    resetInputHeight();
-    setIsProcessing(true);
+  setMessages(prev => [...prev, userMessage]);
+  setInputText('');
+  resetInputHeight();
+  setIsProcessing(true);
 
-    try {
-      const formData = new FormData();
-      formData.append('message', content);
-      formData.append('session_id', sessionId!);
+  try {
+    const formData = new FormData();
+    formData.append('message', content);
+    formData.append('session_id', sessionId!);
 
-      console.log('🤖 Sending message to Eva Agent:', content);
+    console.log('🤖 Sending message to Eva Agent:', content);
 
-      const response = await fetch(`${config.backendUrl}/api/eva/chat-natural`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${sessionId}`
-        },
-        body: formData
-      });
+    const response = await fetch(`${config.backendUrl}/api/eva/chat-natural`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${sessionId}`
+      },
+      body: formData
+    });
 
-      console.log('📡 Response status:', response.status);
+    console.log('📡 Response status:', response.status);
 
-      if (response.ok) {
-        const data: EvaResponse = await response.json();
-        console.log('🤖 Eva Response received:', data);
-        console.log('🎯 Eva Stage:', data.stage);
-        
-        // Clean response
-        const cleanedResponse = data.response
-          .replace(/\*\[Analysis in progress[^\]]*\]\*/g, '')
-          .replace(/\.\.\.\s*$/g, '')
-          .trim();
-        
-        const { parsedMessage, followUpQuestions } = parseEvaMessage(cleanedResponse);
-        
-        const botMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          type: 'bot',
-          content: cleanedResponse,
-          timestamp: new Date(),
-          messageType: 'text',
-          emotional_state: data.emotional_state,
-          classification_pending: data.classification_pending,
-          requires_confirmation: data.requires_confirmation
-        };
-        
-        setMessages(prev => [...prev, botMessage]);
-        
-        // Check if needs background processing
-        const needsBackgroundProcessing = (
-          data.stage === 'triage_analysis_initiated' || 
-          data.background_processing === true ||
-          data.response.includes('analyzing') ||
-          data.response.includes('analysis in progress') ||
-          data.stage === 'awaiting_triage_results'
-        );
-        
-        console.log('🎯 Needs background processing:', needsBackgroundProcessing, 'Stage:', data.stage);
-        
-        if (needsBackgroundProcessing) {
-          console.log('🎯 Starting analysis animation WITH AUTO-POLLING');
-          setShowAnalysisAnimation(true);
-          
-          // Start polling for triage results after 3 seconds
-          setTimeout(async () => {
-            try {
-              // First check if results are ready without sending new message
-              const statusResponse = await fetch(`${config.backendUrl}/api/eva/triage-status/${sessionId}`, {
-                method: 'GET',
-                headers: { 'Authorization': `Bearer ${sessionId}` }
-              });
-              
-              if (statusResponse.ok) {
-                const statusData = await statusResponse.json();
-                
-                if (statusData.triage_results_ready) {
-                  // Results are ready, get them by sending a continue message
-                  const formData = new FormData();
-                  formData.append('message', 'continue_triage'); // Special trigger
-                  formData.append('session_id', sessionId!);
-                  
-                  const response = await fetch(`${config.backendUrl}/api/eva/chat-natural`, {
-                    method: 'POST',
-                    headers: { 'Authorization': `Bearer ${sessionId}` },
-                    body: formData
-                  });
-                  
-                  if (response.ok) {
-                    const resultData = await response.json();
-                    
-                    setShowAnalysisAnimation(false);
-                    
-                    const triageMessage: Message = {
-                      id: (Date.now() + 2).toString(),
-                      type: 'bot',
-                      content: resultData.response,
-                      timestamp: new Date(),
-                      messageType: 'text'
-                    };
-                    
-                    setMessages(prev => [...prev, triageMessage]);
-                    
-                    // Play voice only if user explicitly requests it
-                    // No auto-play by default
-                  }
-                } else {
-                  // Results not ready yet, continue showing animation
-                  setShowAnalysisAnimation(false);
-                  console.log('🎯 Triage results not ready yet');
-                }
-              }
-            } catch (error) {
-              console.error('Auto-polling error:', error);
-              setShowAnalysisAnimation(false);
-            }
-          }, 3000); // 3 seconds like in test case
-        }
-
-        // Handle confirmation requirements
-        if (data.requires_confirmation && data.classification_pending) {
-          setPendingClassification(data.classification_pending);
-          setAwaitingFeedback(true);
-          
-          setTimeout(() => {
-            addSystemMessage(
-              `🔍 I've analyzed your message and classified it as: "${data.classification_pending!.theme}". ` +
-              `Is this correct? Please respond with "Yes, exactly right!" or "No, that's not quite right" to help me learn.`
-            );
-          }, 1000);
-        }
-
-        // NO auto-play - only manual play when user clicks speaker button
-
-        // Handle sequential messages
-        if (data.sequential_messages_active && data.next_message_in_seconds) {
-          setPendingSequentialMessage({
-            conversationId: sessionId!,
-            nextMessageTime: Date.now() + (data.next_message_in_seconds * 1000)
-          });
-        }
-
-        // Handle follow-up questions
-        if (followUpQuestions.length > 0) {
-          addFollowUpQuestions(followUpQuestions);
-        }
-
-      } else {
-        const errorText = await response.text();
-        console.error('❌ Eva API Error:', {
-          status: response.status,
-          statusText: response.statusText,
-          error: errorText
-        });
-        throw new Error(`Eva API failed: ${response.status} - ${errorText}`);
-      }
-    } catch (error) {
-      console.error('❌ Eva chat error:', error);
+    if (response.ok) {
+      const data: EvaResponse = await response.json();
+      console.log('🤖 Eva Response received:', data);
+      console.log('🎯 Eva Stage:', data.stage);
       
-      const errorMessage = (error as Error).message.toLowerCase();
-      let fallbackMessage = `I apologize, ${customerData?.name || 'valued customer'}. `;
+      // Clean response
+      const cleanedResponse = data.response
+        .replace(/\*\[Analysis in progress[^\]]*\]\*/g, '')
+        .replace(/\.\.\.\s*$/g, '')
+        .trim();
       
-      if (errorMessage.includes('triage')) {
-        fallbackMessage += `I'm having trouble analyzing your request right now. Our team has been notified and will review your message manually.`;
-      } else {
-        fallbackMessage += `I'm experiencing a technical issue with my AI systems. Let me try to help you in a different way. What specific banking service do you need assistance with today?`;
-      }
+      const { parsedMessage, followUpQuestions } = parseEvaMessage(cleanedResponse);
       
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
         type: 'bot',
-        content: fallbackMessage,
+        content: cleanedResponse,
         timestamp: new Date(),
-        messageType: 'text'
+        messageType: 'text',
+        emotional_state: data.emotional_state,
       };
       
       setMessages(prev => [...prev, botMessage]);
-      addSystemMessage(`⚠️ ${errorMessage.includes('triage') ? 'Triage system' : 'Eva AI'} temporarily offline. Error: ${(error as Error).message}`);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
 
-  // Detect confirmation responses
-  useEffect(() => {
-    if (!awaitingFeedback || messages.length === 0) return;
-    
-    const lastMessage = messages[messages.length - 1];
-    
-    // Only process USER messages, and only process each message once
-    if (lastMessage.type === 'user' && !lastMessage.processed) {
-      const content = lastMessage.content.toLowerCase();
-      
-      console.log('🎯 Checking for confirmation in user message:', content);
-      
-      // Mark message as processed to prevent duplicate processing
-      setMessages(prev => prev.map(msg => 
-        msg.id === lastMessage.id ? { ...msg, processed: true } : msg
-      ));
-      
-      if (content.includes('yes') || content.includes('correct') || content.includes('exactly') || content.includes('right')) {
-        console.log('✅ Positive confirmation detected');
-        handleClassificationConfirmation('Yes, exactly right!');
-      } else if (content.includes('no') || content.includes('wrong') || content.includes('not right') || content.includes('incorrect')) {
-        console.log('❌ Negative confirmation detected');
-        handleClassificationConfirmation('No, that\'s not quite right');
-      } else if (content.includes('partially') || content.includes('sort of') || content.includes('close but')) {
-        console.log('🔄 Partial confirmation detected');
-        handleClassificationConfirmation('Partially correct, but not exactly');
-      } else {
-        console.log('🤷 No clear confirmation pattern detected');
+      // Handle separated question flow
+      if (data.stage === "ready_for_first_question" && data.needs_first_question) {
+        console.log('🎯 Triggering first follow-up question after delay');
+        
+        // Automatically trigger the first question after a short delay
+        setTimeout(async () => {
+          try {
+            const formData = new FormData();
+            formData.append('message', 'continue_first_question'); // Special trigger
+            formData.append('session_id', sessionId!);
+            
+            const questionResponse = await fetch(`${config.backendUrl}/api/eva/chat-natural`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${sessionId}` },
+              body: formData
+            });
+            
+            if (questionResponse.ok) {
+              const questionData = await questionResponse.json();
+              
+              const questionMessage: Message = {
+                id: (Date.now() + 3).toString(),
+                type: 'bot',
+                content: questionData.response,
+                timestamp: new Date(),
+                messageType: 'text'
+              };
+              
+              setMessages(prev => [...prev, questionMessage]);
+              console.log('✅ First follow-up question added');
+            }
+          } catch (error) {
+            console.error('❌ Error getting first question:', error);
+          }
+        }, 1500); 
       }
+
+      // Check if needs background processing
+      const needsBackgroundProcessing = (
+        data.stage === 'triage_analysis_initiated' || 
+        data.background_processing === true ||
+        data.response.includes('analyzing') ||
+        data.response.includes('analysis in progress') ||
+        data.stage === 'awaiting_triage_results'
+      );
+      
+      console.log('🎯 Needs background processing:', needsBackgroundProcessing, 'Stage:', data.stage);
+      
+      if (needsBackgroundProcessing) {
+        console.log('🎯 Starting analysis animation WITH AUTO-POLLING');
+        setShowAnalysisAnimation(true);
+        
+        // Start polling for triage results after 3 seconds
+        setTimeout(async () => {
+          try {
+            // First check if results are ready without sending new message
+            const statusResponse = await fetch(`${config.backendUrl}/api/eva/triage-status/${sessionId}`, {
+              method: 'GET',
+              headers: { 'Authorization': `Bearer ${sessionId}` }
+            });
+            
+            if (statusResponse.ok) {
+              const statusData = await statusResponse.json();
+              
+              if (statusData.triage_results_ready) {
+                // Results are ready, get them by sending a continue message
+                const formData = new FormData();
+                formData.append('message', 'continue_triage'); // Special trigger
+                formData.append('session_id', sessionId!);
+                
+                const response = await fetch(`${config.backendUrl}/api/eva/chat-natural`, {
+                  method: 'POST',
+                  headers: { 'Authorization': `Bearer ${sessionId}` },
+                  body: formData
+                });
+                
+                if (response.ok) {
+                  const resultData = await response.json();
+                  
+                  setShowAnalysisAnimation(false);
+                  
+                  const triageMessage: Message = {
+                    id: (Date.now() + 2).toString(),
+                    type: 'bot',
+                    content: resultData.response,
+                    timestamp: new Date(),
+                    messageType: 'text'
+                  };
+                  
+                  setMessages(prev => [...prev, triageMessage]);                   
+                }
+              } else {
+                // Results not ready yet, continue showing animation
+                setShowAnalysisAnimation(false);
+                console.log('🎯 Triage results not ready yet');
+              }
+            }
+          } catch (error) {
+            console.error('Auto-polling error:', error);
+            setShowAnalysisAnimation(false);
+          }
+        }, 3000); // 3 seconds like in test case
+      }
+      
+      // Handle sequential messages
+      if (data.sequential_messages_active && data.next_message_in_seconds) {
+        setPendingSequentialMessage({
+          conversationId: sessionId!,
+          nextMessageTime: Date.now() + (data.next_message_in_seconds * 1000)
+        });
+      }
+
+      // Handle follow-up questions
+      if (followUpQuestions.length > 0) {
+        addFollowUpQuestions(followUpQuestions);
+      }
+
+    } else {
+      const errorText = await response.text();
+      console.error('❌ Eva API Error:', {
+        status: response.status,
+        statusText: response.statusText,
+        error: errorText
+      });
+      throw new Error(`Eva API failed: ${response.status} - ${errorText}`);
     }
-  }, [messages, awaitingFeedback, handleClassificationConfirmation]);
+  } catch (error) {
+    console.error('❌ Eva chat error:', error);
+    
+    const errorMessage = (error as Error).message.toLowerCase();
+    let fallbackMessage = `I apologize, ${customerData?.name || 'valued customer'}. `;
+    
+    if (errorMessage.includes('triage')) {
+      fallbackMessage += `I'm having trouble analyzing your request right now. Our team has been notified and will review your message manually.`;
+    } else {
+      fallbackMessage += `I'm experiencing a technical issue with my AI systems. Let me try to help you in a different way. What specific banking service do you need assistance with today?`;
+    }
+    
+    const botMessage: Message = {
+      id: (Date.now() + 1).toString(),
+      type: 'bot',
+      content: fallbackMessage,
+      timestamp: new Date(),
+      messageType: 'text'
+    };
+    
+    setMessages(prev => [...prev, botMessage]);
+    addSystemMessage(`⚠️ ${errorMessage.includes('triage') ? 'Triage system' : 'Eva AI'} temporarily offline. Error: ${(error as Error).message}`);
+  } finally {
+    setIsProcessing(false);
+  }
+};
 
   // Voice input with timeout and animations
   const handleVoiceInput = async () => {
@@ -1765,12 +2430,12 @@ const AuthenticatedEvaChat = () => {
                   >
                     <div className="max-w-[90%] relative">
                       <div
-                        className={`p-4 rounded-lg relative ${
+                        className={`rounded-lg relative ${
                           message.type === 'user'
-                            ? 'bg-gray-800 text-white border border-gray-600'
+                            ? 'bg-gray-800 text-white border border-gray-600 p-4'
                             : message.type === 'system'
-                            ? 'bg-gray-700 text-white text-sm border border-gray-600'
-                            : 'bg-yellow-500 text-black border-2 border-yellow-400 animate-pulse-border'
+                            ? 'bg-gray-700 text-white text-sm border border-gray-600 p-4'
+                            : 'bg-yellow-500 text-black border-2 border-yellow-400 animate-pulse-border p-0' // Remove padding for bot
                         }`}
                       >
                         <div className="text-sm">
@@ -1783,8 +2448,115 @@ const AuthenticatedEvaChat = () => {
                           {/* Use structured parsing for bot messages */}
                           {message.type === 'bot' ? (
                             (() => {
+
+                              // Check if this should use simple text formatting (like Bot 4)
+                              const shouldUseSimpleFormat = (
+                                message.content.includes("Perfect,") || 
+                                message.content.includes("Current Status:") ||
+                                message.content.includes("escalated") ||
+                                message.content.includes("routed") ||
+                                message.content.includes("tracking ID") ||
+                                message.content.includes("I've immediately escalated")
+                              );
+
+                              // NEW: Specific detection for Bot message 7 style (completion/summary messages)
+                              const isBotMessage7Style = (
+                                (message.content.includes("Thank you,") && message.content.includes("I have all the information needed")) ||
+                                (message.content.includes("What I'm doing right now:") && 
+                                message.content.includes("What happens next:") && 
+                                message.content.includes("Your next actions:") &&
+                                message.content.includes("Is there anything else I can help"))
+                              );
+
+                              if (shouldUseSimpleFormat || isBotMessage7Style) {
+                                console.log('🎯 Using simple text formatting like Bot 4');
+                                return <SimpleTextMessage content={message.content} messageId={message.id} />;
+                              }
+
+                              // Check if this is an empathy message (Bot 2nd output)
+                              const isEmpathyMessage = message.content.includes("What I'm doing right now") && 
+                                                      !message.content.includes("**What I'm doing right now:**");
+                              
+                              if (isEmpathyMessage) {
+                                console.log('🎯 Using empathy message formatting');
+                                return (
+                                  <div className="text-sm text-black space-y-2 p-4">
+                                    {message.content.split('\n').map((line, lineIndex) => {
+                                      const trimmed = line.trim();
+                                      if (!trimmed) return <div key={lineIndex} className="h-2" />; // Spacing
+                                      
+                                      // Determine line type based on content patterns
+                                      const isEmpathyStatement = !trimmed.includes('What I\'m doing') && 
+                                                              !trimmed.includes('Analysis Status') && 
+                                                              !trimmed.startsWith('•') &&
+                                                              lineIndex < 3; // First few lines
+                                      
+                                      const isSectionHeader = trimmed.includes('What I\'m doing') || trimmed.includes('Analysis Status');
+                                      const isBulletPoint = trimmed.startsWith('•');
+                                      const isClosingStatement = !isSectionHeader && !isBulletPoint && !isEmpathyStatement;
+                                      
+                                      if (isEmpathyStatement) {
+                                        return (
+                                          <div key={lineIndex} className="leading-relaxed mb-3">
+                                            {trimmed}
+                                          </div>
+                                        );
+                                      }
+                                      
+                                      if (isSectionHeader) {
+                                        return (
+                                          <div key={lineIndex} className="font-semibold mt-4 mb-2">
+                                            {trimmed}
+                                          </div>
+                                        );
+                                      }
+                                      
+                                      if (isBulletPoint) {
+                                        return (
+                                          <div key={lineIndex} className="flex items-start space-x-2 ml-4">
+                                            <span className="opacity-70 mt-1">•</span>
+                                            <span className="leading-relaxed">{trimmed.substring(1).trim()}</span>
+                                          </div>
+                                        );
+                                      }
+                                      
+                                      // Closing statement
+                                      return (
+                                        <div key={lineIndex} className="leading-relaxed mt-3 italic">
+                                          {trimmed}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                );
+                              }
+                              
+                              // First try complex parsing for triage responses
+                              const complexParsed = parseComplexEvaResponse(message.content);
+                              
+                              if (complexParsed.messageStructure === 'complex') {
+                                console.log('🎯 Using complex message structure');
+                                return (
+                                  <ComplexStructuredMessage 
+                                    parsedResponse={complexParsed} 
+                                    messageId={message.id}
+                                    onSendMessage={handleSendMessage}
+                                    onSetInputText={handleSetInputTextWithFocus}
+                                  />
+                                );
+                              }
+                              
+                              // Check if this is a greeting message (contains time-based greeting)
+                              const isGreeting = /^(Good\s+(morning|afternoon|evening),?\s+[^!]+!)/i.test(message.content);
+                              
+                              if (isGreeting) {
+                                console.log('🎯 Using Microsoft Copilot card structure for greeting');
+                                return <MicrosoftCopilotCard content={message.content} messageId={message.id} />;
+                              }
+                              
+                              // Fall back to regular parsing for other messages
                               const { parsedMessage } = parseEvaMessage(message.content);
-                              console.log('🎯 Parsed message result:', parsedMessage);
+                              console.log('🎯 Using regular message structure');
                               
                               return parsedMessage ? (
                                 <StructuredMessage parsedMessage={parsedMessage} messageId={message.id} />
@@ -1929,16 +2701,6 @@ const AuthenticatedEvaChat = () => {
           {/* Enhanced Input Area */}
           {isAuthenticated && (
             <div className="!p-3 bg-black border-t border-gray-700 mt-auto">
-              {/* Show awaiting feedback indicator */}
-              {awaitingFeedback && (
-                <div className="mb-2 p-2 bg-blue-900/20 border border-blue-500/50 rounded text-xs text-blue-400">
-                  <div className="flex items-center space-x-2">
-                    <Brain className="w-3 h-3 animate-pulse" />
-                    <span>Awaiting your feedback to improve my learning...</span>
-                  </div>
-                </div>
-              )}
-              
               <div className="flex items-end space-x-2">
                 <Button
                   variant="ghost"
